@@ -1,0 +1,188 @@
+<!--
+  %\VignetteIndexEntry{Graph Propagation with Lucy}
+  %\VignetteEngine{knitr::rmarkdown}
+  \usepackage[utf8]{inputenc}
+-->
+
+# Graph Propagation with Lucy
+
+Lucy provides basic functions for doing graph propagation on an igraph data structure.
+
+## Motivation for doing propagation with igraph 
+
+Definition of propagation in a system of variables:
+
+* The state of a given variable depends on the states of others.
+* Before updating the state of a variable, the state of variables it depends on must be updated first. 
+
+Examples of this type of systematic update includes:
+
+* Gibbs sampling and other MCMC methods
+* Belief propagation
+* Boolean networks
+* Cellular automata
+
+When variables are vertices/nodes (I use the terms interchangebly) or edges in a graph, then a change to the state of one vertex/edge "propagates" through the rest of the graph.
+
+*Lucy* builds the basis for such propogations using igraph.
+
+Propagation is done with one of either two functions, *update_vertices* or *update_edges*, which predictably do propagation on edges or on vertices.  Each take an igraph object as an argument, as well as two other key arguments; functions "get_determiners" and "callback".  
+
+*get_determiners* must be a function that takes the arguments *g* for a graph object, and *obj*, which is a character naming either a vertex or an edge in the graph g.
+
+```{r, echo=FALSE,message=FALSE}
+library(plyr, quietly = T)
+library(dplyr, quietly = T)
+library(reshape, quietly = T)
+library(lucy, quietly = T)
+library(bnlearn, quietly = T)
+```
+
+## Example 1: Propagation of sums in a directed Network
+
+I start by demonstrating a simple propagation on a tree.  Each node has an initial value.  Then, the value for each node is updated as the sum of its initial value and the values of each of the parents.  Before the value for a node can be calculated, the value of the parents must already have been calculated.
+
+First, I create the graph, create initial values for each node, and then set the *updated* attribute to FALSE.  
+
+```{r}
+g <- ba.game(10) %>% name_vertices
+  V(g)$value <- log(sample(1:50, 10))
+  V(g)$updated <- FALSE
+```
+
+Secondly, I create the callback that will be applied to each node.
+
+```{r}
+getSum <- function(g, v) {
+  parent.nodes <- iparents(g, v)
+  if(length(parent.nodes) > 0) {
+    V(g)[v]$value <- V(g)[v]$value + sum(V(g)[iparents(g, v)]$value)
+    }
+  g
+}
+```
+
+The calculation for each node depends on the parents, so the *get_determiners* argument for the *update_vertices* function will be *iparents*.
+
+```{r}
+g.final <- update_vertices(g, iparents, getSum)
+```
+
+The results:
+
+```{r, echo=FALSE, message=FALSE}
+V(g)$name <- round(V(g)$value, 2)
+V(g.final)$name <-round(V(g.final)$value,2)
+par(mfrow = c(1,2))
+igraphviz(g)
+igraphviz(g.final, main="After Propagation")
+```
+
+## Example 2: Prediction on a multi-layer perceptron
+
+Here I fit a neural network model called a multi-layer perceptron, and use graph propagation to make a prediction.
+
+*infert* is a dataset in the *datasets* package with data on infertility after spontaneous and induced abortion.  Using the *neuralnet* package, I fit an MLP that predicts infertility given the number of prior induced and spontaneous abortions and parity (case count).
+
+```{r, message=FALSE}
+library(neuralnet, quietly=TRUE)
+data(infert, package="datasets")
+net.infert <- neuralnet(case ~ parity + induced + spontaneous, infert,
+                        hidden = 3,
+                        err.fct="sse", linear.output=FALSE, likelihood=TRUE)
+plot(net.infert)
+```
+
+I can use this fitted model for prediction by passing it new input values to the *compute* function.
+
+```{r}
+nnet.prediction <- neuralnet::compute(net.infert, data.frame(parity = 3, 
+                               induced = 2, 
+                               spontaneous = 1)) %>%
+  unlist %>% round(2) %>% #unlist and round the results
+  `names<-`(c("bias1", "parity", "induced", "spontaneous", "bias2",
+                                  "H1", "H2", "H3", "case")) #name the variables
+```
+
+The input values are propagated to the neurons (hidden nodes), and those values are propagated to the outcome I wish to predict.
+
+Now I demonstrate the same predictive results with propagation.
+
+I start by converting the neural net structure to an igraph object.
+
+```{r}
+inputs <- c("parity", "induced", "spontaneous")
+wts <- net.infert$weights[[1]]
+dimnames(wts[[1]]) <- list(c("bias1", inputs),
+                           c("H1", "H2", "H3"))
+dimnames(wts[[2]]) <- list(c("bias2", "H1", "H2", "H3"), "case")
+library(bnlearn)
+g <- wts %>%
+  lapply(melt) %>%
+  rbind.fill %>%
+  `names<-`(c("from", "to", "weight")) %>%
+  graph.data.frame %T>%
+  igraphviz
+```
+
+The weights are stored as the "weight" edge attribute.
+
+```{r}
+E(g)$weight
+```
+
+I add a 'value' attribute to the vertices.  The values for the input are given as 3, 2, 1.  These will be used to calculate values for the hidden variables and ultimately the output variable "case". 
+
+```{r}
+V(g)$value <- NA
+V(g)[inputs]$value <- c(3, 2, 1)
+V(g)["bias1"]$value <- V(g)["bias2"]$value <- 1
+```
+
+I add a "updated" attribute to the vertices as well.  The biases will always have a value of 1, and the inputs are fixed, so I set their *updated* attribute to true.
+
+```{r}
+V(g)$updated <- FALSE
+V(g)[c(inputs, "bias1", "bias2")]$updated <- TRUE
+```
+
+The activation function in the neural network is the logistic function:
+
+```{r}
+activate <- function(x)  1 / (1 + exp(-x))
+```
+
+The activation function is what calculates the value of a node given its parents.  So I use it to create a callback called *calculate_node*. 
+
+```{r}
+calculate_node <- function(g, v){
+  parents <- iparents(g, v)
+  wts <- E(g)[parents %->% v]$weight
+  #wts <- igraph::`[.igraph.es`(E(g), parents %->% v)$weight
+  V(g)[v]$value <- activate(sum(V(g)[parents]$value * wts)) 
+  g
+}
+```
+
+Since the state of each node is determined by the state of its parent nodes, the *get_determiners* function should only return the parents of the node.  This function exists in *Lucy*, it is *iparents*.
+
+Now we are ready for the propagation of values across the vertices.
+
+```{r}
+g.final <- update_vertices(g, get_determiners = iparents, callback = calculate_node)
+propagation.prediction <- V(g.final)$value
+names(propagation.prediction) <- V(g.final)$name
+```
+
+Comparing the original prediction to these results:
+
+```{r}
+round(nnet.prediction, 2)
+round(propagation.prediction, 2)
+```
+
+
+
+
+
+

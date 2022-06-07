@@ -1,0 +1,34 @@
+<!--
+  %\VignetteIndexEntry{More igraph visualization with Lucy}
+  %\VignetteEngine{knitr::rmarkdown}
+  \usepackage[utf8]{inputenc}
+-->
+
+# Useful visualizations using lucy
+
+```{r, message=FALSE}
+#devtools::install_github("robertness/lucy")
+library(lucy)
+set.seed(20)
+```
+
+## Graphviz + igraph
+
+The [*Rgraphviz*](http://www.bioconductor.org/packages/release/bioc/html/Rgraphviz.html) package makes very useful layouts for graphs.  A basic Rgraphviz visualization is implemented in the *igraphviz* function.
+
+```{r}
+igraphviz(ba.game(10))
+```
+
+Rgraphviz is especially useful in the case when there is a hierarchy between graph vertices that can be illustrated with a top-down ordering in the layout.   For example, lucy's *layerDAGs* function stacks layers of highly-connected directed acyclic graphs on top of one another. 
+
+```{r}
+g <- layer_DAGs(6, 3)
+igraphviz(g)
+```
+
+The *plot_path* function takes advantage of this hierarchy visualization technique by coloring all edges lying on paths from an upstream vertex to a downstream vertex.  You can clearly see flow along the paths from top to bottom.
+
+```{r}
+plot_path(g, 6, 13)
+```
